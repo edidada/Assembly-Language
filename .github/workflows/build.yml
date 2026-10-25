@@ -176,7 +176,16 @@ jobs:
           mkdir -p run
           rm -f run/CI_OK.TXT
           jwasm -mz -Fo run/ci_smoke.exe 源代码/_ci/ci_smoke.asm
-          dosbox -c "mount c $(pwd)/run" -c "c:" -c "ci_smoke.exe" -c "exit"
+          # dosbox-staging 0.82 installs the binary as "dosbox-staging";
+          # newer versions also provide a "dosbox" symlink.
+          if [ "$RUNNER_OS" = "macOS" ]; then DB=dosbox-staging; else DB=dosbox; fi
+          # Passing the .exe directly mounts its directory as C:;
+          # dosbox-staging's early-exit guard needs "--exit" in this mode.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            "$DB" --exit "$(pwd)/run/ci_smoke.exe"
+          else
+            "$DB" -c "mount c $(pwd)/run" -c "c:" -c "ci_smoke.exe" -c "exit"
+          fi
           if [ -f run/CI_OK.TXT ]; then
             echo "RUN OK -> $(cat run/CI_OK.TXT)"
           else
@@ -186,13 +195,9 @@ jobs:
       - name: Run under DOSBox (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          SDL_VIDEODRIVER: dummy
-          SDL_AUDIODRIVER: dummy
         run: |
           New-Item -ItemType Directory -Force -Path run | Out-Null
           Remove-Item run/CI_OK.TXT -ErrorAction SilentlyContinue
-          Remove-Item run/DOSBOX.LOG -ErrorAction SilentlyContinue
           jwasm.exe -mz -Fo run/ci_smoke.exe "$env:RUNNER_TEMP/src_ascii/_ci/ci_smoke.asm"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -206,18 +211,12 @@ jobs:
           if (-not $db) { Write-Host "dosbox not found"; exit 1 }
           Write-Host "Using DOSBox: $db"
 
-          $path = Join-Path (Get-Location).Path 'run'
-          $dosArgs = @(
-            '-c', "mount c $path",
-            '-c', 'c:',
-            '-c', 'echo MOUNT_OK>DOSBOX.LOG',
-            '-c', 'ci_smoke.exe',
-            '-c', 'echo PROGRAM_DONE>>DOSBOX.LOG',
-            '-c', 'exit'
-          )
+          # Passing the .exe directly makes DOSBox mount its directory as C:
+          # and run it; "-exit" closes DOSBox when the program terminates.
+          $exe = Join-Path (Get-Location).Path 'run/ci_smoke.exe'
           $stdout = Join-Path $env:RUNNER_TEMP 'dosbox.stdout.log'
           $stderr = Join-Path $env:RUNNER_TEMP 'dosbox.stderr.log'
-          $proc = Start-Process -FilePath $db -ArgumentList $dosArgs `
+          $proc = Start-Process -FilePath $db -ArgumentList @("`"$exe`"", '-exit') `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
           if (-not $proc.WaitForExit(120000)) {
             $proc.Kill()
@@ -229,7 +228,6 @@ jobs:
             Write-Host "RUN OK -> $(Get-Content run/CI_OK.TXT -Raw)"
           } else {
             Write-Host "RUN FAILED: marker file not created"
-            if (Test-Path run/DOSBOX.LOG) { Get-Content run/DOSBOX.LOG }
             if (Test-Path $stdout) { Write-Host '--- dosbox stdout ---'; Get-Content $stdout }
             if (Test-Path $stderr) { Write-Host '--- dosbox stderr ---'; Get-Content $stderr }
             Get-ChildItem run | Format-Table Name,Length
