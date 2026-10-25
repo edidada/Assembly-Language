@@ -1,0 +1,100 @@
+# =====================================================================
+# CI：编译并实际运行汇编程序
+#
+# 本仓库不再提交 .OBJ / .EXE（见 .gitignore），所有可执行文件都由本
+# 工作流现场生成，以证明“源码 -> 汇编 -> 链接 -> DOS 运行”整条链路
+# 可用：
+#
+#   1. 用 JWasm（MASM 兼容汇编器）把 源代码/ 下所有 .asm 汇编成 DOS EXE
+#   2. 用 DOSBox 无头运行 源代码/_ci/ci_smoke.asm
+#   3. 校验程序写出的标记文件 C:\CI_OK.TXT
+#
+# 触发范围限定在 ci 分支，master/main 的完整多平台矩阵由 build.yml 负责，
+# 避免重复跑两遍。
+# =====================================================================
+
+name: CI (assemble & run)
+
+on:
+  push:
+    branches: [ ci ]
+  pull_request:
+    branches: [ ci ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-run:
+    name: Assemble & run under DOSBox
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain and DOSBox
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make git dosbox
+
+      - name: Build JWasm (MASM-compatible assembler)
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v2.20 \
+            https://github.com/Baron-von-Riedesel/JWasm.git "$RUNNER_TEMP/JWasm"
+          make -C "$RUNNER_TEMP/JWasm" -f GccUnix.mak
+          JWASM=$(find "$RUNNER_TEMP/JWasm" -type f -name jwasm | head -1)
+          test -n "$JWASM"
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          cp "$JWASM" "$GITHUB_WORKSPACE/bin/jwasm"
+          echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
+
+      - name: Assemble every .asm source
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          count=0
+          failed=0
+          while IFS= read -r -d '' f; do
+            rel="${f#源代码/}"
+            base="${rel%.*}"
+            outdir="build/${base%/*}"
+            mkdir -p "$outdir"
+            out="build/${base}.exe"
+            if jwasm -mz -Zm -Fo "$out" "$f" >/dev/null 2>&1; then
+              echo "OK   $f"
+            else
+              echo "FAIL $f"
+              jwasm -mz -Zm -Fo "$out" "$f" 2>&1 | head -15 || true
+              failed=$((failed+1))
+            fi
+            count=$((count+1))
+          done < <(find 源代码 -iname '*.asm' -print0)
+          echo "Assembled $count source file(s); failures=$failed"
+          test "$count" -gt 0
+          test "$failed" -eq 0
+
+      - name: Run a program under DOSBox
+        run: |
+          set -euo pipefail
+          export SDL_VIDEODRIVER=dummy
+          export SDL_AUDIODRIVER=dummy
+          mkdir -p run
+          rm -f run/CI_OK.TXT
+          jwasm -mz -Fo run/ci_smoke.exe 源代码/_ci/ci_smoke.asm
+          timeout 120 dosbox \
+            -c "mount c $(pwd)/run" \
+            -c "c:" \
+            -c "ci_smoke.exe" \
+            -c "exit"
+          echo "---- CI_OK.TXT ----"
+          cat run/CI_OK.TXT
+          grep -q "ASSEMBLY_CI_RUN_OK" run/CI_OK.TXT
+          echo "RUN OK"
