@@ -1,6 +1,9 @@
 ; 本书源码使用 MASM 5.x，允许把 "c" 当作段名；
 ; JWasm/MASM 6+ 默认把它视为保留字，这里恢复为普通标识符。
+; @Version 只有 MASM 6+/JWasm 才定义，MASM 5.x 会跳过这条指令。
+ifdef @Version
 option nokeyword:<c>
+endif
 
 assume cs:b, ds:a, ss:c
 
