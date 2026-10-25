@@ -1,0 +1,163 @@
+name: Build & Run (macOS / Linux / Windows)
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-run:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+          - os: ubuntu-24.04
+          - os: macos-13
+          - os: macos-14
+          - os: macos-15
+          - os: windows-2019
+          - os: windows-2022
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 1) Install a C toolchain (only Linux needs gcc/make via apt)
+      # ------------------------------------------------------------------
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y gcc make git
+
+      # ------------------------------------------------------------------
+      # 2) Build JWasm (MASM-compatible assembler) from source.
+      #    On Windows we use the MSVC environment; on Linux/macOS gcc/clang.
+      #    JWasm's "-mz" emits a runnable DOS .EXE directly (no linker).
+      # ------------------------------------------------------------------
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build JWasm (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $srcDir = Join-Path $env:RUNNER_TEMP 'JWasm'
+          git clone --depth 1 --branch v2.20 https://github.com/Baron-von-Riedesel/JWasm.git $srcDir
+          Set-Location $srcDir
+          nmake -f Msvc.mak
+          $exe = Get-ChildItem -Recurse -Filter jwasm.exe | Select-Object -First 1
+          $binDir = Join-Path $env:GITHUB_WORKSPACE 'bin'
+          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+          Copy-Item $exe.FullName (Join-Path $binDir 'jwasm.exe')
+          $binDir | Out-File -Append -FilePath $env:GITHUB_PATH
+
+      - name: Build JWasm (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          git clone --depth 1 --branch v2.20 https://github.com/Baron-von-Riedesel/JWasm.git "$RUNNER_TEMP/JWasm"
+          cd "$RUNNER_TEMP/JWasm"
+          make -f GccUnix.mak
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          cp jwasm "$GITHUB_WORKSPACE/bin/"
+          echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
+
+      - name: JWasm version
+        shell: bash
+        run: jwasm -h 2>&1 | head -3 || jwasm -v
+
+      # ------------------------------------------------------------------
+      # 3) Install DOSBox (the DOS runtime that runs on all three OSes)
+      # ------------------------------------------------------------------
+      - name: Install DOSBox (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get install -y dosbox
+
+      - name: Install DOSBox (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: brew install dosbox
+
+      - name: Install DOSBox (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install dosbox -y
+
+      # ------------------------------------------------------------------
+      # 4) COMPILE: assemble EVERY .asm in the repo into a DOS .EXE.
+      #    Any syntax error fails the job (honest compile check).
+      # ------------------------------------------------------------------
+      - name: Assemble all sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          fail=0
+          count=0
+          while IFS= read -r -d '' f; do
+            rel="${f#源代码/}"
+            base="${rel%.*}"
+            outdir="build/${base%/*}"
+            mkdir -p "$outdir"
+            out="build/${base}.exe"
+            if jwasm -mz -Fo "$out" "$f" >/dev/null 2>&1; then
+              echo "OK   $f"
+            else
+              echo "FAIL $f"
+              fail=1
+            fi
+            count=$((count+1))
+          done < <(find 源代码 -iname '*.asm' -print0)
+          echo "Assembled $count source file(s)."
+          exit $fail
+
+      # ------------------------------------------------------------------
+      # 5) RUN: actually execute a program under DOSBox (headless) and
+      #    verify it produced the marker file -> proves "run" works.
+      # ------------------------------------------------------------------
+      - name: Run under DOSBox (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: |
+          set -euo pipefail
+          mkdir -p run
+          jwasm -mz -Fo run/ci_smoke.exe 源代码/_ci/ci_smoke.asm
+          dosbox -c "mount c $(pwd)/run" -c "c:" -c "ci_smoke.exe" -c "exit"
+          if [ -f run/CI_OK.TXT ]; then
+            echo "RUN OK -> $(cat run/CI_OK.TXT)"
+          else
+            echo "RUN FAILED: marker file not created"; exit 1
+          fi
+
+      - name: Run under DOSBox (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: |
+          New-Item -ItemType Directory -Force -Path run | Out-Null
+          jwasm.exe -mz -Fo run/ci_smoke.exe 源代码/_ci/ci_smoke.asm
+          $path = Join-Path (Get-Location).Path 'run'
+          dosbox -c "mount c $path" -c "c:" -c "ci_smoke.exe" -c "exit"
+          if (Test-Path run/CI_OK.TXT) {
+            Write-Host "RUN OK -> $(Get-Content run/CI_OK.TXT -Raw)"
+          } else {
+            Write-Host "RUN FAILED"; exit 1
+          }
