@@ -41,8 +41,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc make git
 
       # ------------------------------------------------------------------
-      # 2) Build JWasm (MASM-compatible assembler) from source.
-      #    On Windows we use the MSVC environment; on Linux/macOS gcc/clang.
+      # 2) Build/install JWasm (MASM-compatible assembler).
+      #    Linux: build from source. macOS: prebuilt via brew.
+      #    Windows: MSVC environment + nmake.
       #    JWasm's "-mz" emits a runnable DOS .EXE directly (no linker).
       # ------------------------------------------------------------------
       - name: Set up MSVC (Windows)
@@ -63,15 +64,10 @@ jobs:
           Copy-Item $exe.FullName (Join-Path $binDir 'jwasm.exe')
           $binDir | Out-File -Append -FilePath $env:GITHUB_PATH
 
-      - name: Build JWasm (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Build JWasm (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            mkdir -p "$RUNNER_TEMP/inc"
-            printf '#include <malloc/malloc.h>\n' > "$RUNNER_TEMP/inc/malloc.h"
-            export CPATH="$RUNNER_TEMP/inc"
-          fi
           git clone --depth 1 --branch v2.20 https://github.com/Baron-von-Riedesel/JWasm.git "$RUNNER_TEMP/JWasm"
           cd "$RUNNER_TEMP/JWasm"
           make -f GccUnix.mak
@@ -79,6 +75,13 @@ jobs:
           JWASM_BIN=$(find "$RUNNER_TEMP/JWasm" -type f \( -name jwasm -o -name jwasm.exe \) | head -1)
           cp "$JWASM_BIN" "$GITHUB_WORKSPACE/bin/jwasm"
           echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
+
+      - name: Install JWasm (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install jwasm
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
 
       - name: JWasm version
         shell: bash
@@ -104,6 +107,8 @@ jobs:
 
       # ------------------------------------------------------------------
       # 4) COMPILE: assemble EVERY .asm in the repo into a DOS .EXE.
+      #    On Windows the CJK source dir is copied to an ASCII path
+      #    because the MSVC-built jwasm.exe is an ANSI program.
       #    JWasm's MASM-6 mode rejects a few book sources that use
       #    MASM-5.0 reserved-word identifiers (e.g. a segment named "c",
       #    a label named "addr"); those are reported as warnings so the
@@ -115,8 +120,10 @@ jobs:
           set -euo pipefail
           if [ "$RUNNER_OS" = "Windows" ]; then
             SRC="$RUNNER_TEMP/src_ascii"
+            SRC="${SRC//\\//}"
             rm -rf "$SRC"
-            cp -r "源代码" "$SRC"
+            mkdir -p "$SRC"
+            cp -r "源代码/." "$SRC"
           else
             SRC="源代码"
           fi
@@ -173,9 +180,11 @@ jobs:
           jwasm.exe -mz -Zm -Fo run/ci_smoke.exe "$env:RUNNER_TEMP/src_ascii/_ci/ci_smoke.asm"
           $path = Join-Path (Get-Location).Path 'run'
           $db = $null
-          foreach ($c in @('dosbox', (Join-Path $env:ChocolateyInstall 'bin\dosbox.exe'), 'C:\Program Files (x86)\DOSBox\dosbox.exe', 'C:\Program Files\DOSBox\dosbox.exe')) {
-            $cmd = Get-Command $c -ErrorAction SilentlyContinue
-            if ($cmd) { $db = $cmd.Source; break }
+          $dirs = @('C:\ProgramData\chocolatey\bin', 'C:\Program Files (x86)\DOSBox', 'C:\Program Files\DOSBox', 'C:\ProgramData\chocolatey')
+          foreach ($d in $dirs) {
+            if (-not $d -or -not (Test-Path $d)) { continue }
+            $found = Get-ChildItem -Path $d -Recurse -Filter 'dosbox*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $db = $found.FullName; break }
           }
           if (-not $db) { Write-Host "dosbox not found"; exit 1 }
           & $db -c "mount c $path" -c "c:" -c "ci_smoke.exe" -c "exit"
