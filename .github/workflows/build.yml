@@ -106,8 +106,6 @@ jobs:
       - name: Install DOSBox (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: 1
         run: brew install dosbox-staging
 
       - name: Install DOSBox (Windows)
@@ -168,11 +166,15 @@ jobs:
       - name: Run under DOSBox (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash
-        env:
-          SDL_VIDEODRIVER: dummy
-          SDL_AUDIODRIVER: dummy
         run: |
           set -euo pipefail
+          # macOS runners have a window server; use the real Cocoa video
+          # driver because older dosbox-staging builds need OpenGL even
+          # when only the dummy driver is requested.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            export SDL_VIDEODRIVER=dummy
+          fi
+          export SDL_AUDIODRIVER=dummy
           mkdir -p run
           rm -f run/CI_OK.TXT
           jwasm -mz -Fo run/ci_smoke.exe 源代码/_ci/ci_smoke.asm
