@@ -79,6 +79,10 @@ jobs:
           fi
           git clone --depth 1 --branch v2.20 https://github.com/Baron-von-Riedesel/JWasm.git "$RUNNER_TEMP/JWasm"
           cd "$RUNNER_TEMP/JWasm"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # Apple's linker does not understand GNU ld's "-Map <file>".
+            sed -i '' -e 's# -Wl,-Map,\$(OUTD)/\$(TARGET1).map##' -e 's/ -s -o / -o /' GccUnix.mak
+          fi
           make -f GccUnix.mak
           mkdir -p "$GITHUB_WORKSPACE/bin"
           JWASM_BIN=$(find "$RUNNER_TEMP/JWasm" -type f \( -name jwasm -o -name jwasm.exe \) | head -1)
@@ -182,10 +186,14 @@ jobs:
       - name: Run under DOSBox (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
         run: |
           New-Item -ItemType Directory -Force -Path run | Out-Null
           Remove-Item run/CI_OK.TXT -ErrorAction SilentlyContinue
-          jwasm.exe -mz -Zm -Fo run/ci_smoke.exe "$env:RUNNER_TEMP/src_ascii/_ci/ci_smoke.asm"
+          Remove-Item run/DOSBOX.LOG -ErrorAction SilentlyContinue
+          jwasm.exe -mz -Fo run/ci_smoke.exe "$env:RUNNER_TEMP/src_ascii/_ci/ci_smoke.asm"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           # Use the real executable, not the console shim in
@@ -199,16 +207,31 @@ jobs:
           Write-Host "Using DOSBox: $db"
 
           $path = Join-Path (Get-Location).Path 'run'
-          $dosArgs = @('-c', "mount c $path", '-c', 'c:', '-c', 'ci_smoke.exe', '-c', 'exit')
-          $proc = Start-Process -FilePath $db -ArgumentList $dosArgs -PassThru
+          $dosArgs = @(
+            '-c', "mount c $path",
+            '-c', 'c:',
+            '-c', 'echo MOUNT_OK>DOSBOX.LOG',
+            '-c', 'ci_smoke.exe',
+            '-c', 'echo PROGRAM_DONE>>DOSBOX.LOG',
+            '-c', 'exit'
+          )
+          $stdout = Join-Path $env:RUNNER_TEMP 'dosbox.stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'dosbox.stderr.log'
+          $proc = Start-Process -FilePath $db -ArgumentList $dosArgs `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
           if (-not $proc.WaitForExit(120000)) {
             $proc.Kill()
             Write-Host "RUN FAILED: DOSBox timed out"
             exit 1
           }
+          Write-Host "DOSBox exit code: $($proc.ExitCode)"
           if (Test-Path run/CI_OK.TXT) {
             Write-Host "RUN OK -> $(Get-Content run/CI_OK.TXT -Raw)"
           } else {
             Write-Host "RUN FAILED: marker file not created"
+            if (Test-Path run/DOSBOX.LOG) { Get-Content run/DOSBOX.LOG }
+            if (Test-Path $stdout) { Write-Host '--- dosbox stdout ---'; Get-Content $stdout }
+            if (Test-Path $stderr) { Write-Host '--- dosbox stderr ---'; Get-Content $stderr }
+            Get-ChildItem run | Format-Table Name,Length
             exit 1
           }
