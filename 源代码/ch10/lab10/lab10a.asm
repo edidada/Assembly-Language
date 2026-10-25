@@ -1,3 +1,7 @@
+; 本书源码使用 MASM 5.x，允许把 "addr" 当作标号；
+; JWasm/MASM 6+ 默认把它视为保留字，这里恢复为普通标识符。
+option nokeyword:<addr>
+
 assume cs:code  
 data segment  
 	db 'Welcome to masm!',0  

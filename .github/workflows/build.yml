@@ -22,12 +22,13 @@ jobs:
         include:
           - os: ubuntu-22.04
           - os: ubuntu-24.04
-          - os: macos-13
-          - os: macos-14
           - os: macos-15
-          - os: windows-2019
+          - os: macos-26
           - os: windows-2022
+          - os: windows-2025
     runs-on: ${{ matrix.os }}
+    # A sane upper bound in case DOSBox ever fails to quit by itself.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,8 +43,8 @@ jobs:
 
       # ------------------------------------------------------------------
       # 2) Build/install JWasm (MASM-compatible assembler).
-      #    Linux: build from source. macOS: prebuilt via brew.
-      #    Windows: MSVC environment + nmake.
+      #    Linux/macOS: build from source (Homebrew no longer ships a
+      #    "jwasm" formula). Windows: MSVC environment + nmake.
       #    JWasm's "-mz" emits a runnable DOS .EXE directly (no linker).
       # ------------------------------------------------------------------
       - name: Set up MSVC (Windows)
@@ -64,10 +65,18 @@ jobs:
           Copy-Item $exe.FullName (Join-Path $binDir 'jwasm.exe')
           $binDir | Out-File -Append -FilePath $env:GITHUB_PATH
 
-      - name: Build JWasm (Linux)
-        if: runner.os == 'Linux'
+      - name: Build JWasm (Linux/macOS)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # macOS has no <malloc.h>; provide a shim that gives JWasm the
+            # two things it needs from it: malloc()/free() and alloca().
+            mkdir -p "$RUNNER_TEMP/inc"
+            printf '#include <stdlib.h>\n#include <alloca.h>\n' > "$RUNNER_TEMP/inc/malloc.h"
+            export CPATH="$RUNNER_TEMP/inc"
+          fi
           git clone --depth 1 --branch v2.20 https://github.com/Baron-von-Riedesel/JWasm.git "$RUNNER_TEMP/JWasm"
           cd "$RUNNER_TEMP/JWasm"
           make -f GccUnix.mak
@@ -76,19 +85,14 @@ jobs:
           cp "$JWASM_BIN" "$GITHUB_WORKSPACE/bin/jwasm"
           echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
 
-      - name: Install JWasm (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          brew install jwasm
-          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
-
       - name: JWasm version
         shell: bash
         run: jwasm -h 2>&1 | head -3 || true
 
       # ------------------------------------------------------------------
-      # 3) Install DOSBox (the DOS runtime that runs on all three OSes)
+      # 3) Install DOSBox (the DOS runtime that runs on all three OSes).
+      #    Homebrew's "dosbox" formula was removed; dosbox-staging is the
+      #    maintained replacement and also installs a "dosbox" binary.
       # ------------------------------------------------------------------
       - name: Install DOSBox (Linux)
         if: runner.os == 'Linux'
@@ -98,7 +102,9 @@ jobs:
       - name: Install DOSBox (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        run: brew install dosbox
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: brew install dosbox-staging
 
       - name: Install DOSBox (Windows)
         if: runner.os == 'Windows'
@@ -109,10 +115,9 @@ jobs:
       # 4) COMPILE: assemble EVERY .asm in the repo into a DOS .EXE.
       #    On Windows the CJK source dir is copied to an ASCII path
       #    because the MSVC-built jwasm.exe is an ANSI program.
-      #    JWasm's MASM-6 mode rejects a few book sources that use
-      #    MASM-5.0 reserved-word identifiers (e.g. a segment named "c",
-      #    a label named "addr"); those are reported as warnings so the
-      #    matrix still goes green and the run step can be validated.
+      #    Book sources that use MASM-5.0 reserved words as identifiers
+      #    declare "option nokeyword:<...>" in the source itself, so a
+      #    failure here means a real regression and fails the build.
       # ------------------------------------------------------------------
       - name: Assemble all sources
         shell: bash
@@ -128,8 +133,8 @@ jobs:
             SRC="源代码"
           fi
           mkdir -p build
-          fail=0
           count=0
+          failed=0
           while IFS= read -r -d '' f; do
             rel="${f#$SRC/}"
             base="${rel%.*}"
@@ -140,13 +145,17 @@ jobs:
               echo "OK   $f"
             else
               echo "FAIL $f"
+              echo "::error file=$f::assembly failed"
               jwasm -mz -Zm -Fo "$out" "$f" 2>&1 | head -15 || true
-              fail=1
+              failed=$((failed+1))
             fi
             count=$((count+1))
           done < <(find "$SRC" -iname '*.asm' -print0)
-          echo "Assembled $count source file(s); failures=$fail"
-          if [ "$fail" -ne 0 ]; then echo "::warning::Some sources did not assemble"; fi
+          echo "Assembled $count source file(s); failures=$failed"
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::$failed source file(s) did not assemble"
+            exit 1
+          fi
 
       # ------------------------------------------------------------------
       # 5) RUN: actually execute a program under DOSBox (headless) and
@@ -161,6 +170,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p run
+          rm -f run/CI_OK.TXT
           jwasm -mz -Fo run/ci_smoke.exe 源代码/_ci/ci_smoke.asm
           dosbox -c "mount c $(pwd)/run" -c "c:" -c "ci_smoke.exe" -c "exit"
           if [ -f run/CI_OK.TXT ]; then
@@ -172,24 +182,33 @@ jobs:
       - name: Run under DOSBox (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          SDL_VIDEODRIVER: dummy
-          SDL_AUDIODRIVER: dummy
         run: |
           New-Item -ItemType Directory -Force -Path run | Out-Null
+          Remove-Item run/CI_OK.TXT -ErrorAction SilentlyContinue
           jwasm.exe -mz -Zm -Fo run/ci_smoke.exe "$env:RUNNER_TEMP/src_ascii/_ci/ci_smoke.asm"
-          $path = Join-Path (Get-Location).Path 'run'
-          $db = $null
-          $dirs = @('C:\ProgramData\chocolatey\bin', 'C:\Program Files (x86)\DOSBox', 'C:\Program Files\DOSBox', 'C:\ProgramData\chocolatey')
-          foreach ($d in $dirs) {
-            if (-not $d -or -not (Test-Path $d)) { continue }
-            $found = Get-ChildItem -Path $d -Recurse -Filter 'dosbox*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) { $db = $found.FullName; break }
-          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # Use the real executable, not the console shim in
+          # C:\ProgramData\chocolatey\bin (which returns immediately).
+          $db = Get-ChildItem @(
+            'C:\Program Files (x86)\DOSBox*',
+            'C:\Program Files\DOSBox*'
+          ) -Recurse -Filter dosbox.exe -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty FullName
           if (-not $db) { Write-Host "dosbox not found"; exit 1 }
-          & $db -c "mount c $path" -c "c:" -c "ci_smoke.exe" -c "exit"
+          Write-Host "Using DOSBox: $db"
+
+          $path = Join-Path (Get-Location).Path 'run'
+          $dosArgs = @('-c', "mount c $path", '-c', 'c:', '-c', 'ci_smoke.exe', '-c', 'exit')
+          $proc = Start-Process -FilePath $db -ArgumentList $dosArgs -PassThru
+          if (-not $proc.WaitForExit(120000)) {
+            $proc.Kill()
+            Write-Host "RUN FAILED: DOSBox timed out"
+            exit 1
+          }
           if (Test-Path run/CI_OK.TXT) {
             Write-Host "RUN OK -> $(Get-Content run/CI_OK.TXT -Raw)"
           } else {
-            Write-Host "RUN FAILED"; exit 1
+            Write-Host "RUN FAILED: marker file not created"
+            exit 1
           }
