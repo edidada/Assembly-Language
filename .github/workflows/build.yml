@@ -96,7 +96,7 @@ jobs:
       # ------------------------------------------------------------------
       # 3) Install DOSBox (the DOS runtime that runs on all three OSes).
       #    Homebrew's "dosbox" formula was removed; dosbox-staging is the
-      #    maintained replacement and also installs a "dosbox" binary.
+      #    maintained replacement (0.83+ also provides a "dosbox" symlink).
       # ------------------------------------------------------------------
       - name: Install DOSBox (Linux)
         if: runner.os == 'Linux'
@@ -160,8 +160,8 @@ jobs:
           fi
 
       # ------------------------------------------------------------------
-      # 5) RUN: actually execute a program under DOSBox (headless) and
-      #    verify it produced the marker file -> proves "run" works.
+      # 5) RUN: actually execute a program under DOSBox and verify it
+      #    produced the marker file -> proves "run" works end-to-end.
       # ------------------------------------------------------------------
       - name: Run under DOSBox (Linux/macOS)
         if: runner.os != 'Windows'
