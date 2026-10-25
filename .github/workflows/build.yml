@@ -77,7 +77,7 @@ jobs:
 
       - name: JWasm version
         shell: bash
-        run: jwasm -h 2>&1 | head -3 || jwasm -v
+        run: jwasm -h 2>&1 | head -3 || true
 
       # ------------------------------------------------------------------
       # 3) Install DOSBox (the DOS runtime that runs on all three OSes)
