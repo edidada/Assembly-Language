@@ -114,11 +114,11 @@ jobs:
             outdir="build/${base%/*}"
             mkdir -p "$outdir"
             out="build/${base}.exe"
-            if jwasm -mz -Fo "$out" "$f" >/dev/null 2>&1; then
+            if jwasm -mz -Zm -Fo "$out" "$f" >/dev/null 2>&1; then
               echo "OK   $f"
             else
               echo "FAIL $f"
-              jwasm -mz -Fo "$out" "$f" 2>&1 | head -15
+              jwasm -mz -Zm -Fo "$out" "$f" 2>&1 | head -15 || true
               fail=1
             fi
             count=$((count+1))
